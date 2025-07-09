@@ -1,0 +1,58 @@
+#!/bin/bash
+
+TMP_DIR=$(mktemp -d)
+
+# Get orgs
+gcloud organizations list --format=json > "$TMP_DIR/orgs.json"
+
+# Get folders per org
+jq -r '.[].ID' "$TMP_DIR/orgs.json" | while read -r ORG_ID; do
+  gcloud resource-manager folders list --organization="$ORG_ID" --format=json >> "$TMP_DIR/folders_raw.json" 2>/dev/null
+done
+jq -s 'add' "$TMP_DIR/folders_raw.json" > "$TMP_DIR/folders.json"
+
+# Get projects
+gcloud projects list --format=json > "$TMP_DIR/projects.json"
+
+# Get billing accounts
+gcloud beta billing accounts list --format=json > "$TMP_DIR/billing_accounts.json"
+
+# Get budgets per billing account
+jq -r '.[].name' "$TMP_DIR/billing_accounts.json" | while read -r ACCOUNT_ID; do
+  BUDGETS=$(gcloud beta billing budgets list --billing-account="$ACCOUNT_ID" --format=json 2>/dev/null || echo '[]')
+  jq -n --arg billingAccount "$ACCOUNT_ID" --argjson budgets "$BUDGETS" \
+    '{billingAccount: $billingAccount, budgets: $budgets}' >> "$TMP_DIR/budgets_raw.json"
+done
+jq -s '.' "$TMP_DIR/budgets_raw.json" > "$TMP_DIR/budgets.json"
+
+# Per-project details
+jq -r '.[].projectId' "$TMP_DIR/projects.json" | while read -r PROJECT_ID; do
+  BILLING=$(gcloud beta billing projects describe "$PROJECT_ID" --format=json 2>/dev/null || echo '{}')
+  SERVICES=$(gcloud services list --enabled --project="$PROJECT_ID" --format=json 2>/dev/null || echo '[]')
+  LABELS=$(gcloud projects describe "$PROJECT_ID" --format=json 2>/dev/null || echo '{}')
+  jq -n \
+    --arg projectId "$PROJECT_ID" \
+    --argjson billing "$BILLING" \
+    --argjson services "$SERVICES" \
+    --argjson labels "$LABELS" \
+    '{projectId: $projectId, billing: $billing, services: $services, labels: $labels}' \
+    >> "$TMP_DIR/project_details_raw.json"
+done
+jq -s '.' "$TMP_DIR/project_details_raw.json" > "$TMP_DIR/project_details.json"
+
+# Final merge
+jq -n \
+  --slurpfile organizations "$TMP_DIR/orgs.json" \
+  --slurpfile folders "$TMP_DIR/folders.json" \
+  --slurpfile projects "$TMP_DIR/projects.json" \
+  --slurpfile billingAccounts "$TMP_DIR/billing_accounts.json" \
+  --slurpfile budgets "$TMP_DIR/budgets.json" \
+  --slurpfile projectDetails "$TMP_DIR/project_details.json" \
+  '{
+    organizations: $organizations[0],
+    folders: $folders[0],
+    projects: $projects[0],
+    billingAccounts: $billingAccounts[0],
+    budgets: $budgets[0],
+    projectDetails: $projectDetails[0]
+  }'
